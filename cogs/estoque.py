@@ -29,6 +29,7 @@ from db import (
 )
 from models import ITEM_LINK, ITEM_TEXTO, Produto, plano_tem_estoque
 from utils import exigir_admin, formatar_preco
+from views import aplicar_icones_da_loja, formatar_preco
 
 LIMITE_DO_TEXTO = 4000
 
@@ -340,7 +341,10 @@ class Estoque(commands.Cog):
         await interacao.response.send_message(
             f"Tem certeza que quer apagar **{disponivel}** unidade(s) de **{produto.nome}**?\n"
             "_Itens ja entregues nao sao afetados._",
-            view=ConfirmarLimpezaView(interacao.guild_id, produto.id, produto.nome),
+            view=await aplicar_icones_da_loja(
+                interacao.guild_id,
+                ConfirmarLimpezaView(interacao.guild_id, produto.id, produto.nome),
+            ),
             ephemeral=True,
         )
 

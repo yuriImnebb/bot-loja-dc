@@ -41,6 +41,7 @@ from models import (
     Produto,
 )
 from utils import exigir_dono
+from views import aplicar_icones_da_loja
 
 log = logging.getLogger(__name__)
 
@@ -450,7 +451,10 @@ class Master(commands.Cog):
             f"**{nome_servidor}**?\n"
             "_Nome, chave PIX e canais de venda/logs voltam ao padrao. "
             "Categorias, produtos, estoque e pedidos **nao** sao apagados._",
-            view=ConfirmarLimpezaLojaView(alvo, nome_servidor),
+            view=await aplicar_icones_da_loja(
+                alvo,
+                ConfirmarLimpezaLojaView(alvo, nome_servidor),
+            ),
             ephemeral=True,
         )
 
@@ -498,7 +502,10 @@ class Master(commands.Cog):
             f"Tem certeza que quer **tirar o bot** do servidor **{guild.name}**?\n"
             "_A loja de la para de funcionar imediatamente. "
             "Isso nao apaga nada do banco._",
-            view=ConfirmarSaidaView(guild.id, guild.name),
+            view=await aplicar_icones_da_loja(
+                guild.id,
+                ConfirmarSaidaView(guild.id, guild.name),
+            ),
             ephemeral=True,
         )
 

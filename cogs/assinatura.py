@@ -28,6 +28,7 @@ from db import (
 )
 from models import PLANO_MEDIA, PLANO_PRO, ROTULOS_DE_PLANO
 from utils import formatar_preco
+from views import aplicar_icones_da_loja
 
 log = logging.getLogger(__name__)
 
@@ -160,7 +161,10 @@ async def iniciar_assinatura(interacao: discord.Interaction, plano: str) -> None
     await interacao.followup.send(
         embed=embed,
         file=_arquivo_qr(cobranca_mp),
-        view=AssinarView(),
+        view=await aplicar_icones_da_loja(
+            interacao.guild_id,
+            AssinarView(),
+        ),
         ephemeral=True,
     )
 
@@ -248,7 +252,12 @@ class Assinatura(commands.Cog):
             return
 
         await interacao.response.send_message(
-            embed=montar_tabela_de_precos(), view=AssinarView(), ephemeral=True
+            embed=montar_tabela_de_precos(),
+            view=await aplicar_icones_da_loja(
+                interacao.guild_id,
+                AssinarView(),
+            ),
+            ephemeral=True,
         )
 
     # ------------------------------------------------------------------ #
@@ -280,7 +289,10 @@ class Assinatura(commands.Cog):
                 ),
                 inline=False,
             )
-            view = AssinarView()
+            view = await aplicar_icones_da_loja(
+                interacao.guild_id,
+                AssinarView(),
+            )
 
         embed.set_footer(
             text="Use /assinar para renovar ou mudar de plano."

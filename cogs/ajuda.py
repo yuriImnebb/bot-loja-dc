@@ -5,6 +5,8 @@ from __future__ import annotations
 import discord
 from discord.ext import commands
 
+from views import aplicar_icones_da_loja
+
 import config
 
 PAGINA_DONO = discord.Embed(
@@ -170,7 +172,12 @@ class Ajuda(commands.Cog):
     @discord.app_commands.guild_only()
     async def ajuda(self, interacao: discord.Interaction) -> None:
         await interacao.response.send_message(
-            embed=PAGINAS["dono"], view=AjudaView(), ephemeral=True
+            embed=PAGINAS["dono"],
+            view=await aplicar_icones_da_loja(
+                interacao.guild_id,
+                AjudaView(),
+            ),
+            ephemeral=True,
         )
 
 

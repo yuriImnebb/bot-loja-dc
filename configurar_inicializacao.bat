@@ -12,7 +12,7 @@ if not exist "%exePath%" (
     exit /b
 )
 
-:: Copia o .env e a pasta data para a pasta dist (se nao existirem la)
+
 if not exist "%~dp0dist\.env" copy "%envPath%" "%~dp0dist\.env"
 if not exist "%~dp0dist\data" xcopy "%dataPath%" "%~dp0dist\data" /I /E /Y
 

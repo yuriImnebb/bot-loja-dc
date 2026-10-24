@@ -119,7 +119,9 @@ def gerar_payload(
 def gerar_qr_png(payload: str) -> BytesIO:
     """Gera a imagem do QR Code do payload, pronta para enviar no Discord."""
     import qrcode
-
+    
+    # Esta operacao e CPU-bound e síncrona. 
+    # Idealmente deve ser chamada via run_in_executor para nao travar o bot.
     qr = qrcode.QRCode(
         error_correction=qrcode.constants.ERROR_CORRECT_M,
         box_size=8,

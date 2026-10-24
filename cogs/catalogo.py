@@ -10,8 +10,8 @@ from discord.ext import commands
 from sqlalchemy import select, update
 
 import config
-from db import Session, pegar_loja
-from models import Categoria, Produto
+from db import Session, pegar_loja, plano_do_servidor
+from models import ITEM_LINK, ITEM_TEXTO, Categoria, Produto, plano_tem_estoque
 from utils import exigir_admin, formatar_preco, parse_preco
 
 
@@ -33,6 +33,9 @@ class Catalogo(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+
+    async def _plano_liberado_para_entrega(self, guild_id: int) -> bool:
+        return plano_tem_estoque(await plano_do_servidor(guild_id))
 
     # ------------------------------------------------------------------ #
     # Autocomplete
@@ -201,6 +204,19 @@ class Catalogo(commands.Cog):
         preco="Preco em reais, exemplo: 19,90",
         categoria_id="Categoria do produto (opcional)",
         descricao="Texto que o comprador vai ler antes de pagar (opcional)",
+        modo_estoque="Quantidade limitada ou vendas infinitas",
+        tipo_entrega="Formato do conteudo enviado em cada venda infinita",
+        conteudo_entrega="Conteudo reutilizado e enviado automaticamente em cada venda infinita",
+    )
+    @app_commands.choices(
+        modo_estoque=[
+            app_commands.Choice(name="Estoque limitado (unidades cadastradas)", value="limitado"),
+            app_commands.Choice(name="Quantidade infinita (mesmo conteudo em cada venda)", value="infinito"),
+        ],
+        tipo_entrega=[
+            app_commands.Choice(name="Link", value=ITEM_LINK),
+            app_commands.Choice(name="Texto", value=ITEM_TEXTO),
+        ],
     )
     @app_commands.autocomplete(categoria_id=sugerir_categorias)
     @exigir_admin()
@@ -211,6 +227,9 @@ class Catalogo(commands.Cog):
         preco: str,
         categoria_id: Optional[int] = None,
         descricao: Optional[str] = None,
+        modo_estoque: Optional[app_commands.Choice[str]] = None,
+        tipo_entrega: Optional[app_commands.Choice[str]] = None,
+        conteudo_entrega: Optional[str] = None,
     ) -> None:
         nome = nome.strip()
         if len(nome) < 2:
@@ -221,6 +240,35 @@ class Catalogo(commands.Cog):
             centavos = parse_preco(preco)
         except ValueError as erro:
             await interacao.response.send_message(f"⚠️ {erro}", ephemeral=True)
+            return
+
+        modo = modo_estoque.value if modo_estoque else None
+        conteudo = (conteudo_entrega or "").strip()
+        if modo == "infinito" and (not conteudo or tipo_entrega is None):
+            await interacao.response.send_message(
+                "Para entrega infinita automatica, informe o tipo e o conteudo que sera enviado em cada compra.",
+                ephemeral=True,
+            )
+            return
+        if modo == "limitado" and (conteudo or tipo_entrega is not None):
+            await interacao.response.send_message(
+                "Produtos com estoque limitado recebem um item por compra via `/estoque adicionar`; nao informe conteudo infinito.",
+                ephemeral=True,
+            )
+            return
+        if modo is None and (conteudo or tipo_entrega is not None):
+            await interacao.response.send_message(
+                "Escolha o modo de estoque para configurar o conteudo de entrega.",
+                ephemeral=True,
+            )
+            return
+        if (modo == "limitado" or (modo == "infinito" and conteudo)) and not await self._plano_liberado_para_entrega(
+            interacao.guild_id
+        ):
+            await interacao.response.send_message(
+                "Estoque limitado e entrega automatica estao disponiveis nos planos Media e Pro.",
+                ephemeral=True,
+            )
             return
 
         async with Session() as sessao:
@@ -237,6 +285,9 @@ class Catalogo(commands.Cog):
                 nome=nome[:100],
                 descricao=(descricao or "").strip() or None,
                 preco_centavos=centavos,
+                estoque_limitado=modo == "limitado",
+                entrega_infinita=conteudo or None,
+                tipo_entrega_infinita=tipo_entrega.value if tipo_entrega else None,
             )
             sessao.add(produto)
             await sessao.commit()
@@ -244,7 +295,16 @@ class Catalogo(commands.Cog):
 
         await interacao.response.send_message(
             f"✅ Produto **{produto.nome}** cadastrado por **{formatar_preco(produto.preco_centavos)}**.\n"
+            f"Modo: **{'estoque limitado' if produto.estoque_limitado else 'quantidade infinita' if produto.entrega_infinita else 'entrega manual'}**. "
             "Ele ja aparece para os clientes em `/loja`.\n"
+            + (
+                "Cadastre as unidades com `/estoque adicionar`."
+                if produto.estoque_limitado
+                else "O conteudo configurado sera enviado automaticamente em cada venda."
+                if produto.entrega_infinita
+                else "Este produto foi criado para entrega manual."
+            )
+            + "\n"
             "_Dica: o comprador ve a descricao do produto no momento da compra._",
             ephemeral=True,
         )
@@ -282,7 +342,9 @@ class Catalogo(commands.Cog):
         embed = discord.Embed(title="📦 Produtos da loja", color=config.COR_LOJA)
         for nome_grupo, itens in list(grupos.items())[:25]:
             linhas = [
-                f"{'🟢' if produto.ativo else '🔴'} **{produto.nome}** — {formatar_preco(produto.preco_centavos)}"
+                f"{'🟢' if produto.ativo else '🔴'} **{produto.nome}** — "
+                f"{formatar_preco(produto.preco_centavos)} — "
+                f"{'estoque limitado' if produto.estoque_limitado else 'infinito' if produto.entrega_infinita else 'manual'}"
                 for produto in itens[:10]
             ]
             embed.add_field(name=f"📂 {nome_grupo}", value="\n".join(linhas)[:1024], inline=False)
@@ -297,6 +359,19 @@ class Catalogo(commands.Cog):
         preco="Novo preco (opcional), exemplo: 29,90",
         descricao="Nova descricao (opcional)",
         categoria_id="Mover para outra categoria (opcional)",
+        modo_estoque="Estoque limitado ou infinito (opcional)",
+        tipo_entrega="Formato do conteudo reutilizavel (opcional)",
+        conteudo_entrega="Conteudo enviado automaticamente nas vendas infinitas (opcional)",
+    )
+    @app_commands.choices(
+        modo_estoque=[
+            app_commands.Choice(name="Estoque limitado", value="limitado"),
+            app_commands.Choice(name="Quantidade infinita", value="infinito"),
+        ],
+        tipo_entrega=[
+            app_commands.Choice(name="Link", value=ITEM_LINK),
+            app_commands.Choice(name="Texto", value=ITEM_TEXTO),
+        ],
     )
     @app_commands.autocomplete(produto_id=sugerir_produtos, categoria_id=sugerir_categorias)
     @exigir_admin()
@@ -308,10 +383,36 @@ class Catalogo(commands.Cog):
         preco: Optional[str] = None,
         descricao: Optional[str] = None,
         categoria_id: Optional[int] = None,
+        modo_estoque: Optional[app_commands.Choice[str]] = None,
+        tipo_entrega: Optional[app_commands.Choice[str]] = None,
+        conteudo_entrega: Optional[str] = None,
     ) -> None:
-        if nome is None and preco is None and descricao is None and categoria_id is None:
+        if all(
+            valor is None
+            for valor in (
+                nome, preco, descricao, categoria_id, modo_estoque,
+                tipo_entrega, conteudo_entrega,
+            )
+        ):
             await interacao.response.send_message(
-                "Informe pelo menos um campo para alterar (nome, preco, descricao ou categoria_id).",
+                "Informe pelo menos um campo para alterar.",
+                ephemeral=True,
+            )
+            return
+        if modo_estoque and modo_estoque.value == "limitado" and (
+            conteudo_entrega is not None or tipo_entrega is not None
+        ):
+            await interacao.response.send_message(
+                "Use `/estoque adicionar` para cadastrar unidades no modo limitado.",
+                ephemeral=True,
+            )
+            return
+        if (
+            (modo_estoque is not None or conteudo_entrega is not None or tipo_entrega is not None)
+            and not await self._plano_liberado_para_entrega(interacao.guild_id)
+        ):
+            await interacao.response.send_message(
+                "Estoque limitado e entrega automatica estao disponiveis nos planos Media e Pro.",
                 ephemeral=True,
             )
             return
@@ -335,6 +436,22 @@ class Catalogo(commands.Cog):
             if categoria_id is not None:
                 categoria = await sessao.get(Categoria, categoria_id)
                 produto.categoria_id = categoria_id if categoria and categoria.guild_id == interacao.guild_id else None
+            if modo_estoque is not None:
+                produto.estoque_limitado = modo_estoque.value == "limitado"
+            if conteudo_entrega is not None:
+                produto.entrega_infinita = conteudo_entrega.strip() or None
+            if tipo_entrega is not None:
+                produto.tipo_entrega_infinita = tipo_entrega.value
+            if (
+                not produto.estoque_limitado
+                and (conteudo_entrega is not None or modo_estoque is not None)
+                and (not produto.entrega_infinita or not produto.tipo_entrega_infinita)
+            ):
+                await interacao.response.send_message(
+                    "Para entrega infinita automatica, informe o tipo e o conteudo em `/produto editar`.",
+                    ephemeral=True,
+                )
+                return
 
             await sessao.commit()
             await sessao.refresh(produto)

@@ -109,9 +109,10 @@ class Admin(commands.Cog):
             loja.canal_logs_id = canal_logs.id
             await sessao.commit()
 
+        from views import PainelMestreView
         publicado = True
         try:
-            await canal_vendas.send(embed=montar_painel(loja), view=AbrirLojaView())
+            await canal_vendas.send(embed=montar_painel(loja), view=PainelMestreView(loja))
         except discord.HTTPException:
             publicado = False
             log.warning("Nao consegui publicar o painel no servidor %s.", guild.id)

@@ -14,16 +14,17 @@ import pix
 from db import Session, pegar_loja, plano_do_servidor
 from models import ROTULOS_DE_PLANO, Categoria, Produto, plano_tem_estoque
 from utils import exigir_admin, formatar_preco
-from views import AbrirLojaView, abrir_catalogo, montar_painel
+from views import AbrirLojaView, abrir_catalogo, aplicar_icones_da_loja, montar_painel
 
 
 # --------------------------------------------------------------------------- #
 # Configuracao da loja (menu de tipo de chave -> formulario)
 # --------------------------------------------------------------------------- #
 class ConfigurarLojaModal(discord.ui.Modal, title="Configurar a loja"):
-    def __init__(self, tipo_chave: str) -> None:
+    def __init__(self, tipo_chave: str, voltar_ao_painel: bool = False) -> None:
         super().__init__()
         self.tipo_chave = tipo_chave
+        self.voltar_ao_painel = voltar_ao_painel
 
         self.campo_nome = discord.ui.TextInput(
             label="Nome da loja",
@@ -69,7 +70,7 @@ class ConfigurarLojaModal(discord.ui.Modal, title="Configurar a loja"):
             chave_normalizada = pix.normalizar_chave(self.tipo_chave, chave)
         except ValueError as erro:
             await interacao.response.send_message(
-                f"⚠️ {erro}\nRode `/painel configurar` novamente e corrija a chave.", ephemeral=True
+                f"⚠️ {erro}\nAbra Configurar loja no painel e tente novamente.", ephemeral=True
             )
             return
 
@@ -82,22 +83,40 @@ class ConfigurarLojaModal(discord.ui.Modal, title="Configurar a loja"):
             loja.pix_cidade = cidade[:40] or "SAO PAULO"
             await sessao.commit()
 
-        await interacao.response.send_message(
-            f"✅ Loja **{nome}** salva!\n\n"
-            "**Proximos passos:**\n"
-            "1️⃣ `/categoria criar` — organize seus produtos\n"
-            "2️⃣ `/produto criar` — cadastre o que voce vende\n"
-            "3️⃣ `/painel canais` — escolha o canal de vendas e o de logs\n"
-            "4️⃣ `/painel publicar` — publique o painel para os clientes\n"
-            "5️⃣ `/loja` — teste uma compra como se fosse um cliente\n\n"
-            "O dinheiro cai direto na sua conta PIX. Use `/ajuda` para o tutorial completo.",
-            ephemeral=True,
-        )
+        if self.voltar_ao_painel:
+            from cogs.gestao_loja import PainelGestaoLojaView
+
+            await interacao.response.send_message(
+                f"✅ Loja **{nome}** e dados do PIX salvos. Continue configurando neste painel.",
+                embed=discord.Embed(
+                    title="Produtos e estoque",
+                    description="Agora voce pode cadastrar produtos, ajustar valores e publicar a loja.",
+                    color=config.COR_PREMIUM,
+                ),
+                view=await aplicar_icones_da_loja(
+                    interacao.guild_id,
+                    PainelGestaoLojaView(interacao.guild_id),
+                ),
+                ephemeral=True,
+            )
+        else:
+            await interacao.response.send_message(
+                f"✅ Loja **{nome}** salva!\n\n"
+                "**Proximos passos:**\n"
+                "1️⃣ `/categoria criar` — organize seus produtos\n"
+                "2️⃣ `/produto criar` — cadastre o que voce vende\n"
+                "3️⃣ `/painel canais` — escolha o canal de vendas e o de logs\n"
+                "4️⃣ `/painel publicar` — publique o painel para os clientes\n"
+                "5️⃣ `/loja` — teste uma compra como se fosse um cliente\n\n"
+                "O dinheiro cai direto na sua conta PIX. Use `/ajuda` para o tutorial completo.",
+                ephemeral=True,
+            )
 
 
 class TipoChaveView(discord.ui.View):
-    def __init__(self) -> None:
+    def __init__(self, voltar_ao_painel: bool = False) -> None:
         super().__init__(timeout=300)
+        self.voltar_ao_painel = voltar_ao_painel
         menu = discord.ui.Select(
             placeholder="Qual e o tipo da sua chave PIX?",
             options=[
@@ -117,7 +136,9 @@ class TipoChaveView(discord.ui.View):
 
     async def escolher(self, interacao: discord.Interaction) -> None:
         tipo = interacao.data["values"][0]
-        await interacao.response.send_modal(ConfigurarLojaModal(tipo))
+        await interacao.response.send_modal(
+            ConfigurarLojaModal(tipo, voltar_ao_painel=self.voltar_ao_painel)
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -147,59 +168,19 @@ class Loja(commands.Cog):
     # ------------------------------------------------------------------ #
     # /painel
     # ------------------------------------------------------------------ #
-    @grupo_painel.command(name="configurar", description="Configura o nome da loja e a chave PIX que recebe os pagamentos")
+    @grupo_painel.command(name="gerenciar", description="Abre o painel administrativo central da sua loja")
     @exigir_admin()
-    async def painel_configurar(self, interacao: discord.Interaction) -> None:
-        await interacao.response.send_message(
-            embed=discord.Embed(
-                title="⚙️ Configurar loja",
-                description=(
-                    "Primeiro escolha **o tipo da sua chave PIX** no menu abaixo.\n\n"
-                    "A chave fica visivel apenas para quem compra (no QR Code e no Copia e Cola), "
-                    "e o dinheiro cai direto na sua conta."
-                ),
-                color=config.COR_LOJA,
-            ),
-            view=TipoChaveView(),
-            ephemeral=True,
-        )
-
-    @grupo_painel.command(name="canais", description="Escolhe o canal de vendas e o canal de logs")
-    @app_commands.describe(
-        vendas="Canal onde os cards de pedido aparecem para voce confirmar",
-        logs="Canal onde ficam os registros de cada venda",
-    )
-    @exigir_admin()
-    async def painel_canais(
-        self,
-        interacao: discord.Interaction,
-        vendas: Optional[discord.TextChannel] = None,
-        logs: Optional[discord.TextChannel] = None,
-    ) -> None:
-        if vendas is None and logs is None:
-            await interacao.response.send_message(
-                "Informe pelo menos um canal.\n"
-                "Exemplo: `/painel canais vendas:#vendas logs:#logs`\n\n"
-                "_Se voce nao escolher, os pedidos aparecem no mesmo canal onde a compra foi feita._",
-                ephemeral=True,
-            )
-            return
+    async def painel_gerenciar(self, interacao: discord.Interaction) -> None:
+        await interacao.response.defer(ephemeral=True, thinking=True)
 
         async with Session() as sessao:
             loja = await pegar_loja(sessao, interacao.guild_id)
-            if vendas is not None:
-                loja.canal_vendas_id = vendas.id
-            if logs is not None:
-                loja.canal_logs_id = logs.id
-            await sessao.commit()
-
-        partes = []
-        if vendas is not None:
-            partes.append(f"🧾 Pedidos vao para {vendas.mention}")
-        if logs is not None:
-            partes.append(f"📋 Logs vao para {logs.mention}")
-
-        await interacao.response.send_message("✅ " + "\n".join(partes), ephemeral=True)
+        
+        from views import PainelAdminView, montar_painel_admin
+        await interacao.edit_original_response(
+            embed=montar_painel_admin(loja), 
+            view=PainelAdminView(loja), 
+        )
 
     @grupo_painel.command(name="publicar", description="Publica o painel da loja para os clientes")
     @app_commands.describe(canal="Canal onde o painel sera publicado (padrao: o canal atual)")
@@ -208,77 +189,100 @@ class Loja(commands.Cog):
         self, interacao: discord.Interaction, canal: Optional[discord.TextChannel] = None
     ) -> None:
         destino = canal or interacao.channel
+        
+        # Defer para evitar timeout se precisar buscar mensagem antiga
+        if not interacao.response.is_done():
+            await interacao.response.defer(ephemeral=True)
 
         async with Session() as sessao:
             loja = await pegar_loja(sessao, interacao.guild_id)
 
-        try:
-            await destino.send(embed=montar_painel(loja), view=AbrirLojaView())
-        except discord.HTTPException:
-            await interacao.response.send_message(
-                "Nao consegui publicar neste canal. Confira se eu tenho permissao de **Enviar Mensagens**. ",
-                ephemeral=True,
-            )
-            return
+        from views import PainelMestreView
+        view = PainelMestreView(loja)
 
-        await interacao.response.send_message(
-            f"✅ Painel publicado em {destino.mention}.\n"
-            "Qualquer pessoa pode clicar em **Ver produtos** e comprar.",
+        # Tenta editar o painel antigo se ele existir no mesmo canal
+        painel_editado = False
+        if loja.painel_mensagem_id and loja.painel_canal_id == destino.id:
+            try:
+                msg = await destino.fetch_message(loja.painel_mensagem_id)
+                await msg.edit(embed=montar_painel(loja), view=view)
+                painel_editado = True
+            except (discord.NotFound, discord.HTTPException):
+                pass
+
+        if not painel_editado:
+            try:
+                mensagem = await destino.send(embed=montar_painel(loja), view=view)
+                async with Session() as sessao:
+                    loja_db = await pegar_loja(sessao, interacao.guild_id)
+                    loja_db.painel_mensagem_id = mensagem.id
+                    loja_db.painel_canal_id = destino.id
+                    await sessao.commit()
+            except discord.HTTPException:
+                await interacao.followup.send(
+                    "Nao consegui publicar neste canal. Confira se eu tenho permissao de **Enviar Mensagens**. ",
+                    ephemeral=True,
+                )
+                return
+
+        await interacao.followup.send(
+            f"✅ Painel {'atualizado' if painel_editado else 'publicado'} em {destino.mention}.",
             ephemeral=True,
         )
 
-    @grupo_painel.command(name="info", description="Mostra um resumo da configuracao da loja")
+    @grupo_painel.command(name="personalizar", description="Personaliza o visual do seu painel (banner, logo e cor)")
+    @app_commands.describe(
+        banner="Imagem grande que fica no topo (anexe o arquivo)",
+        logo="Imagem quadrada pequena no canto (anexe o arquivo)",
+        cor="Cor da lateral da mensagem em Hex (Ex: #FF0000 para Vermelho)"
+    )
     @exigir_admin()
-    async def painel_info(self, interacao: discord.Interaction) -> None:
+    async def painel_personalizar(
+        self,
+        interacao: discord.Interaction,
+        banner: Optional[discord.Attachment] = None,
+        logo: Optional[discord.Attachment] = None,
+        cor: Optional[str] = None
+    ) -> None:
+        if not any([banner, logo, cor]):
+            await interacao.response.send_message(
+                "Informe pelo menos uma coisa para mudar (anexe o banner, a logo ou digite a cor).",
+                ephemeral=True
+            )
+            return
+
+        await interacao.response.defer(ephemeral=True)
+
         async with Session() as sessao:
             loja = await pegar_loja(sessao, interacao.guild_id)
-            categorias = await sessao.scalar(
-                select(func.count()).select_from(Categoria).where(Categoria.guild_id == interacao.guild_id)
-            )
-            produtos = await sessao.scalar(
-                select(func.count()).select_from(Produto).where(Produto.guild_id == interacao.guild_id)
-            )
+            
+            if banner:
+                if not banner.content_type or not banner.content_type.startswith("image/"):
+                    await interacao.followup.send("O banner precisa ser uma imagem (PNG, JPG, etc).", ephemeral=True)
+                    return
+                loja.banner_url = banner.url
+            
+            if logo:
+                if not logo.content_type or not logo.content_type.startswith("image/"):
+                    await interacao.followup.send("A logo precisa ser uma imagem (PNG, JPG, etc).", ephemeral=True)
+                    return
+                loja.logo_url = logo.url
+            
+            if cor:
+                cor = cor.strip()
+                if not cor.startswith("#"):
+                    cor = "#" + cor
+                if len(cor) != 7:
+                    await interacao.followup.send("Cor invalida. Use o formato Hex, ex: `#FF0000`.", ephemeral=True)
+                    return
+                loja.cor_hex = cor
 
-        if loja.pix_chave:
-            chave_mostrada = f"{loja.pix_tipo} ••••{str(loja.pix_chave)[-4:]}"
-        else:
-            chave_mostrada = "❌ nao configurada"
+            await sessao.commit()
 
-        plano = await plano_do_servidor(interacao.guild_id)
-
-        plano_rotulo = ROTULOS_DE_PLANO.get(plano, plano)
-        tem_estoque = plano_tem_estoque(plano)
-
-        embed = discord.Embed(title=f"📊 {loja.nome}", color=config.COR_LOJA)
-        embed.add_field(
-            name="Plano",
-            value=f"**{plano_rotulo}**" + (" (estoque liberado)" if tem_estoque else ""),
-            inline=False,
+        await interacao.followup.send(
+            "✅ Personalizacao salva! Use `/painel publicar` para atualizar o painel no canal.",
+            ephemeral=True
         )
-        embed.add_field(name="Chave PIX", value=chave_mostrada, inline=False)
-        embed.add_field(name="Titular", value=loja.pix_titular or "—", inline=True)
-        embed.add_field(name="Cidade", value=loja.pix_cidade or "—", inline=True)
-        embed.add_field(name="Categorias", value=str(categorias or 0), inline=True)
-        embed.add_field(name="Produtos", value=str(produtos or 0), inline=True)
-        embed.add_field(
-            name="Canal de pedidos",
-            value=f"<#{loja.canal_vendas_id}>" if loja.canal_vendas_id else "o mesmo da compra",
-            inline=True,
-        )
-        embed.add_field(
-            name="Canal de logs",
-            value=f"<#{loja.canal_logs_id}>" if loja.canal_logs_id else "nao definido",
-            inline=True,
-        )
-
-        pendencias = []
-        if not loja.pix_chave:
-            pendencias.append("`/painel configurar` — falta a chave PIX")
-        if not produtos:
-            pendencias.append("`/produto criar` — falta cadastrar produtos")
-        embed.set_footer(text=("Falta: " + " • ".join(pendencias)) if pendencias else "Tudo pronto! Use /loja para testar.")
-
-        await interacao.response.send_message(embed=embed, ephemeral=True)
 
     # ------------------------------------------------------------------ #
     # Consulta de precos rapida

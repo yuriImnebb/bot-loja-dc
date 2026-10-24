@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, false
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 STATUS_PENDENTE = "pendente"
@@ -99,6 +99,20 @@ class Loja(Base):
     canal_vendas_id: Mapped[Optional[int]] = mapped_column(BigInteger)
     canal_logs_id: Mapped[Optional[int]] = mapped_column(BigInteger)
 
+    # Personalizacao visual
+    banner_url: Mapped[Optional[str]] = mapped_column(Text)
+    logo_url: Mapped[Optional[str]] = mapped_column(Text)
+    cor_hex: Mapped[Optional[str]] = mapped_column(String(7)) # Ex: #7289DA
+    icone_catalogo: Mapped[Optional[str]] = mapped_column(String(100))
+    icone_suporte: Mapped[Optional[str]] = mapped_column(String(100))
+    icone_compra: Mapped[Optional[str]] = mapped_column(String(100))
+    icone_voltar: Mapped[Optional[str]] = mapped_column(String(100))
+    icones_botoes_json: Mapped[Optional[str]] = mapped_column(Text)
+
+    # Controle para evitar duplicacao de paineis
+    painel_mensagem_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+    painel_canal_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+
     criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=agora)
 
 
@@ -127,6 +141,14 @@ class Produto(Base):
     descricao: Mapped[Optional[str]] = mapped_column(Text)
     preco_centavos: Mapped[int] = mapped_column(Integer)
     ativo: Mapped[bool] = mapped_column(Boolean, default=True)
+    estoque_limitado: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
+    entrega_infinita: Mapped[Optional[str]] = mapped_column(Text)
+    tipo_entrega_infinita: Mapped[Optional[str]] = mapped_column(String(10))
+    alerta_estoque_enviado: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
 
     criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=agora)
 
@@ -273,3 +295,90 @@ class Pagamento(Base):
     criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=agora)
     pago_em: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     observacao: Mapped[Optional[str]] = mapped_column(String(200))
+
+
+class ConfigTicket(Base):
+    """Configuracao do sistema de tickets da loja."""
+
+    __tablename__ = "config_tickets"
+
+    guild_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    categoria_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+    canal_logs_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+    
+    # Painel fixo de tickets
+    painel_mensagem_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+    painel_canal_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+
+    criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=agora)
+
+
+class Ticket(Base):
+    """Um ticket aberto por um cliente."""
+
+    __tablename__ = "tickets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    usuario_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    canal_id: Mapped[int] = mapped_column(BigInteger, unique=True)
+    
+    status: Mapped[str] = mapped_column(String(20), default="aberto") # aberto, fechado
+    
+    criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=agora)
+    fechado_em: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    fechado_por: Mapped[Optional[int]] = mapped_column(BigInteger)
+
+class ConfigWelcome(Base):
+    """Configuracao de boas-vindas do servidor."""
+    __tablename__ = "config_welcome"
+
+    guild_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    canal_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+    mensagem: Mapped[str] = mapped_column(Text, default="Seja bem-vindo(a) ao servidor, {user}!")
+    ativo: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class ConfigAutomacao(Base):
+    """Preferencias de automacao definidas pelo dono de cada loja."""
+
+    __tablename__ = "config_automacoes"
+
+    guild_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    expirar_pedidos: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
+    finalizar_sorteios: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
+    alertar_estoque_baixo: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
+    boas_vindas: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
+
+
+class Giveaway(Base):
+    """Sorteios realizados no servidor."""
+    __tablename__ = "giveaways"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    premio: Mapped[str] = mapped_column(String(100))
+    vencedores_qtd: Mapped[int] = mapped_column(Integer, default=1)
+    canal_id: Mapped[int] = mapped_column(BigInteger)
+    mensagem_id: Mapped[Optional[int]] = mapped_column(BigInteger)
+    
+    termina_em: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finalizado: Mapped[bool] = mapped_column(Boolean, default=False)
+    
+    criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=agora)
+
+class GiveawayParticipant(Base):
+    """Participantes de um sorteio."""
+    __tablename__ = "giveaway_participants"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    giveaway_id: Mapped[int] = mapped_column(Integer, index=True)
+    usuario_id: Mapped[int] = mapped_column(BigInteger)

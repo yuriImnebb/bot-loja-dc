@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, inspect, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import config
@@ -20,12 +20,14 @@ from models import (
     STATUS_PENDENTE,
     Base,
     BotProprio,
+    ConfigAutomacao,
     Cortesia,
     ItemEstoque,
     Licenca,
     Loja,
     Pagamento,
     Pedido,
+    Produto,
     agora,
 )
 
@@ -34,9 +36,88 @@ Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False
 
 
 async def init_db() -> None:
-    """Cria as tabelas que ainda nao existem."""
+    """Cria as tabelas que ainda nao existem e otimiza o SQLite."""
     async with engine.begin() as conexao:
+        # Habilita o modo WAL para melhor performance em concorrência
+        await conexao.exec_driver_sql("PRAGMA journal_mode=WAL")
+        await conexao.exec_driver_sql("PRAGMA synchronous=NORMAL")
         await conexao.run_sync(Base.metadata.create_all)
+        await conexao.run_sync(_migrar_colunas_produtos)
+        await conexao.run_sync(_migrar_colunas_lojas)
+
+
+def _migrar_colunas_produtos(conexao) -> None:
+    """Adiciona campos de estoque sem apagar dados de bancos existentes."""
+    colunas = {coluna["name"] for coluna in inspect(conexao).get_columns("produtos")}
+    tinha_modo_estoque = "estoque_limitado" in colunas
+    novas_colunas = {
+        "estoque_limitado": "BOOLEAN NOT NULL DEFAULT FALSE",
+        "entrega_infinita": "TEXT",
+        "tipo_entrega_infinita": "VARCHAR(10)",
+        "alerta_estoque_enviado": "BOOLEAN NOT NULL DEFAULT FALSE",
+    }
+    for nome, definicao in novas_colunas.items():
+        if nome not in colunas:
+            conexao.exec_driver_sql(f"ALTER TABLE produtos ADD COLUMN {nome} {definicao}")
+
+    if not tinha_modo_estoque:
+        conexao.exec_driver_sql(
+            "UPDATE produtos SET estoque_limitado = TRUE "
+            "WHERE EXISTS (SELECT 1 FROM estoque "
+            "WHERE estoque.produto_id = produtos.id "
+            "AND estoque.guild_id = produtos.guild_id)"
+        )
+
+
+def _migrar_colunas_lojas(conexao) -> None:
+    """Adiciona configuracoes de icones sem alterar lojas existentes."""
+    colunas = {coluna["name"] for coluna in inspect(conexao).get_columns("lojas")}
+    novas_colunas = {
+        "icone_catalogo": "VARCHAR(100)",
+        "icone_suporte": "VARCHAR(100)",
+        "icone_compra": "VARCHAR(100)",
+        "icone_voltar": "VARCHAR(100)",
+        "icones_botoes_json": "TEXT",
+    }
+    for nome, definicao in novas_colunas.items():
+        if nome not in colunas:
+            conexao.exec_driver_sql(f"ALTER TABLE lojas ADD COLUMN {nome} {definicao}")
+
+
+async def obter_config_automacao(guild_id: int) -> ConfigAutomacao:
+    """Retorna as preferencias do servidor; automacoes novas comecam desligadas."""
+    async with Session() as sessao:
+        configuracao = await sessao.get(ConfigAutomacao, guild_id)
+        return configuracao or ConfigAutomacao(guild_id=guild_id)
+
+
+async def alternar_automacao(guild_id: int, nome: str) -> ConfigAutomacao:
+    """Inverte uma automacao suportada e persiste a preferencia."""
+    campos = {
+        "expirar_pedidos",
+        "finalizar_sorteios",
+        "alertar_estoque_baixo",
+        "boas_vindas",
+    }
+    if nome not in campos:
+        raise ValueError(f"Automacao desconhecida: {nome}")
+
+    async with Session() as sessao:
+        configuracao = await sessao.get(ConfigAutomacao, guild_id)
+        if configuracao is None:
+            configuracao = ConfigAutomacao(guild_id=guild_id)
+            sessao.add(configuracao)
+        setattr(configuracao, nome, not getattr(configuracao, nome))
+        await sessao.commit()
+        await sessao.refresh(configuracao)
+        return configuracao
+
+
+async def automacao_ativa(guild_id: int, nome: str) -> bool:
+    configuracao = await obter_config_automacao(guild_id)
+    if not hasattr(configuracao, nome):
+        raise ValueError(f"Automacao desconhecida: {nome}")
+    return bool(getattr(configuracao, nome))
 
 
 async def pegar_loja(sessao: AsyncSession, guild_id: int) -> Loja:
@@ -53,18 +134,25 @@ async def pegar_loja(sessao: AsyncSession, guild_id: int) -> Loja:
 async def marcar_pago(pedido_id: int, confirmado_por: int) -> tuple[Optional[Pedido], str]:
     """Marca o pedido como pago. Retorna (pedido, motivo_da_falha)."""
     async with Session() as sessao:
+        resultado = await sessao.execute(
+            update(Pedido)
+            .where(Pedido.id == pedido_id, Pedido.status == STATUS_PENDENTE)
+            .values(
+                status=STATUS_PAGO,
+                pago_em=agora(),
+                confirmado_por=confirmado_por,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if resultado.rowcount == 1:
+            await sessao.commit()
+            pedido = await sessao.get(Pedido, pedido_id)
+            return pedido, ""
+
         pedido = await sessao.get(Pedido, pedido_id)
         if pedido is None:
             return None, "Pedido nao encontrado."
-        if pedido.status != STATUS_PENDENTE:
-            return pedido, f"Este pedido ja esta como **{pedido.status}**."
-
-        pedido.status = STATUS_PAGO
-        pedido.pago_em = agora()
-        pedido.confirmado_por = confirmado_por
-        await sessao.commit()
-        await sessao.refresh(pedido)
-        return pedido, ""
+        return pedido, f"Este pedido ja esta como **{pedido.status}**."
 
 
 async def marcar_cancelado(pedido_id: int, cancelado_por: int) -> tuple[Optional[Pedido], str]:
@@ -111,17 +199,30 @@ async def em_cortesia(sessao: AsyncSession, guild_id: int) -> bool:
     return await sessao.get(Cortesia, guild_id) is not None
 
 
-async def plano_do_servidor(guild_id: int) -> str:
-    """Plano que vale agora neste servidor (ja contando bloqueio/expiracao).
+# Cache simples para o plano do servidor (evita bater no banco em todo clique de botao)
+# Estrutura: {guild_id: (plano, timestamp_expiracao)}
+_cache_plano: dict[int, tuple[str, float]] = {}
+CACHE_PLANO_DURACAO = 60.0 # 1 minuto
 
-    Servidores marcados como cortesia (no .env ou dados com /master cortesia)
-    tem o bot liberado de graca no plano Pro.
-    """
+async def plano_do_servidor(guild_id: int) -> str:
+    """Plano que vale agora neste servidor (ja contando bloqueio/expiracao)."""
+    import time
+    agora_ts = time.time()
+    
+    if guild_id in _cache_plano:
+        plano, expira = _cache_plano[guild_id]
+        if agora_ts < expira:
+            return plano
+
     async with Session() as sessao:
         if await em_cortesia(sessao, guild_id):
-            return PLANO_PRO
-        licenca = await pegar_licenca(sessao, guild_id)
-        return licenca.plano_efetivo()
+            plano = PLANO_PRO
+        else:
+            licenca = await pegar_licenca(sessao, guild_id)
+            plano = licenca.plano_efetivo()
+        
+    _cache_plano[guild_id] = (plano, agora_ts + CACHE_PLANO_DURACAO)
+    return plano
 
 
 async def pegar_licenca_detalhada(guild_id: int) -> tuple[str, bool, Optional[object]]:
@@ -251,15 +352,21 @@ async def adicionar_estoque(
     guild_id: int, produto_id: int, tipo: str, conteudos: list[str]
 ) -> int:
     """Adiciona unidades ao estoque de um produto. Devolve quantas entraram."""
-    itens = [
-        ItemEstoque(guild_id=guild_id, produto_id=produto_id, tipo=tipo, conteudo=conteudo)
-        for conteudo in conteudos
-    ]
-    if not itens:
+    if not conteudos:
         return 0
 
     async with Session() as sessao:
+        produto = await sessao.get(Produto, produto_id)
+        if produto is None or produto.guild_id != guild_id:
+            return 0
+
+        itens = [
+            ItemEstoque(guild_id=guild_id, produto_id=produto_id, tipo=tipo, conteudo=conteudo)
+            for conteudo in conteudos
+        ]
         sessao.add_all(itens)
+        produto.estoque_limitado = True
+        produto.alerta_estoque_enviado = False
         await sessao.commit()
     return len(itens)
 
@@ -280,18 +387,44 @@ async def contar_estoque(guild_id: int, produto_id: int) -> int:
 
 
 async def produto_usa_estoque(guild_id: int, produto_id: int) -> bool:
-    """True se o produto ja teve estoque cadastrado (entregue ou nao).
-
-    Serve para diferenciar produtos com entrega automatica de produtos
-    entregues na mao pelo dono da loja.
-    """
+    """True quando o produto foi configurado com quantidade limitada."""
     async with Session() as sessao:
-        total = await sessao.scalar(
-            select(func.count())
-            .select_from(ItemEstoque)
-            .where(ItemEstoque.guild_id == guild_id, ItemEstoque.produto_id == produto_id)
+        produto = await sessao.get(Produto, produto_id)
+        return bool(produto and produto.guild_id == guild_id and produto.estoque_limitado)
+
+
+async def marcar_alerta_estoque_baixo(
+    guild_id: int, produto_id: int, limite: int
+) -> Optional[int]:
+    """Marca um unico aviso quando o estoque limitado cruza o limite configurado."""
+    async with Session() as sessao:
+        produto = await sessao.get(Produto, produto_id)
+        if (
+            produto is None
+            or produto.guild_id != guild_id
+            or not produto.estoque_limitado
+            or produto.alerta_estoque_enviado
+        ):
+            return None
+
+        disponivel = int(
+            await sessao.scalar(
+                select(func.count())
+                .select_from(ItemEstoque)
+                .where(
+                    ItemEstoque.guild_id == guild_id,
+                    ItemEstoque.produto_id == produto_id,
+                    ItemEstoque.entregue.is_(False),
+                )
+            )
+            or 0
         )
-        return bool(total)
+        if disponivel > limite:
+            return None
+
+        produto.alerta_estoque_enviado = True
+        await sessao.commit()
+        return disponivel
 
 
 async def contar_estoque_por_produto(guild_id: int, produto_ids: list[int]) -> dict[int, int]:
@@ -340,6 +473,38 @@ async def remover_item_estoque(guild_id: int, item_id: int) -> bool:
         return True
 
 
+async def remover_proxima_unidade_estoque(guild_id: int, produto_id: int) -> bool:
+    """Remove a unidade disponivel mais antiga, sem afetar itens ja entregues."""
+    async with Session() as sessao:
+        item_id = await sessao.scalar(
+            select(ItemEstoque.id)
+            .where(
+                ItemEstoque.guild_id == guild_id,
+                ItemEstoque.produto_id == produto_id,
+                ItemEstoque.entregue.is_(False),
+            )
+            .order_by(ItemEstoque.id)
+            .limit(1)
+        )
+        if item_id is None:
+            return False
+
+        resultado = await sessao.execute(
+            delete(ItemEstoque).where(
+                ItemEstoque.id == item_id,
+                ItemEstoque.guild_id == guild_id,
+                ItemEstoque.produto_id == produto_id,
+                ItemEstoque.entregue.is_(False),
+            )
+        )
+        if resultado.rowcount != 1:
+            await sessao.rollback()
+            return False
+
+        await sessao.commit()
+        return True
+
+
 async def limpar_estoque(guild_id: int, produto_id: int) -> int:
     """Remove todas as unidades ainda nao entregues de um produto."""
     async with Session() as sessao:
@@ -368,25 +533,36 @@ async def consumir_item_estoque(
     Retorna None quando o estoque acabou.
     """
     async with Session() as sessao:
-        item = await sessao.scalar(
-            select(ItemEstoque)
-            .where(
-                ItemEstoque.guild_id == guild_id,
-                ItemEstoque.produto_id == produto_id,
-                ItemEstoque.entregue.is_(False),
+        for _ in range(3):
+            item = await sessao.scalar(
+                select(ItemEstoque)
+                .where(
+                    ItemEstoque.guild_id == guild_id,
+                    ItemEstoque.produto_id == produto_id,
+                    ItemEstoque.entregue.is_(False),
+                )
+                .order_by(ItemEstoque.id)
+                .limit(1)
             )
-            .order_by(ItemEstoque.id)
-            .limit(1)
-        )
-        if item is None:
-            return None
+            if item is None:
+                return None
 
-        item.entregue = True
-        item.pedido_id = pedido_id
-        item.entregue_em = agora()
-        await sessao.commit()
-        await sessao.refresh(item)
-        return item
+            resultado = await sessao.execute(
+                update(ItemEstoque)
+                .where(
+                    ItemEstoque.id == item.id,
+                    ItemEstoque.entregue.is_(False),
+                )
+                .values(entregue=True, pedido_id=pedido_id, entregue_em=agora())
+                .execution_options(synchronize_session=False)
+            )
+            if resultado.rowcount == 1:
+                await sessao.commit()
+                await sessao.refresh(item)
+                return item
+            await sessao.rollback()
+
+        return None
 
 
 # --------------------------------------------------------------------------- #

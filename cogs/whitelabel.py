@@ -13,6 +13,7 @@ import whitelabel
 from db import pegar_bot_proprio, plano_do_servidor, remover_bot_proprio
 from models import PLANO_PRO
 from utils import eh_dono, exigir_admin
+from views import aplicar_icones_da_loja
 
 log = logging.getLogger(__name__)
 
@@ -189,7 +190,12 @@ class WhiteLabel(commands.Cog):
         embed.title = "🔑 Conectar o SEU bot"
         embed.description = "Leia com atenção antes de mandar o token 👇"
         await interacao.response.send_message(
-            embed=embed, view=PrepararBotView(), ephemeral=True
+            embed=embed,
+            view=await aplicar_icones_da_loja(
+                interacao.guild_id,
+                PrepararBotView(),
+            ),
+            ephemeral=True,
         )
 
     # ------------------------------------------------------------------ #

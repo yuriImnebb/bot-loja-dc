@@ -89,7 +89,8 @@ def preco_do_plano(plano: str) -> int:
 
 
 # Cores padrao das mensagens
-COR_LOJA = 0x5865F2
-COR_SUCESSO = 0x57F287
-COR_ALERTA = 0xFEE75C
-COR_ERRO = 0xED4245
+COR_LOJA = 0x2B2D31
+COR_SUCESSO = 0x23A559
+COR_ALERTA = 0xF0B232
+COR_ERRO = 0xF23F43
+COR_PREMIUM = 0x7289DA

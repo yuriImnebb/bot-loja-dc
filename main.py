@@ -32,14 +32,19 @@ EXTENSOES = (
     "cogs.assinatura",
     "cogs.whitelabel",
     "cogs.ajuda",
+    "cogs.ticket",
+    "cogs.automacao",
+    "cogs.welcome",
 )
 
 
 class BotVendas(commands.Bot):
     def __init__(self) -> None:
+        intents = discord.Intents.default()
+        intents.members = True
         super().__init__(
             command_prefix="!",
-            intents=discord.Intents.default(),
+            intents=intents,
             help_command=None,
         )
 
@@ -63,8 +68,13 @@ class BotVendas(commands.Bot):
 
     async def _registrar_views_persistentes(self) -> None:
         """Reativa os botoes que ja estavam no ar antes do reinicio."""
+        # Nota: PainelMestreView e PainelAdminView sao carregadas dinamicamente
         self.add_view(AbrirLojaView())
         self.add_view(AssinarView())
+        from views import PainelMestreView, PainelAdminView, ParticiparView
+        self.add_view(PainelMestreView(None))
+        self.add_view(PainelAdminView(None))
+        self.add_view(ParticiparView(0))
 
         pendentes = await ids_de_pedidos_pendentes()
         for pedido_id in pendentes:
